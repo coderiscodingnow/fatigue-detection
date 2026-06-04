@@ -13,6 +13,15 @@ YOLO-Drowsiness-Detection/*.png
 *.pt
 *.onnx
 
+Drowsiness-Detection-1/
+runs/detect/train/
+runs/detect/train-2/
+runs/detect/train-3/
+runs/detect/train-4/weights/last.pt
+venv/
+__pycache__/
+*.pyc
+
 # Secrets
 serviceAccountKey.json
 .env
