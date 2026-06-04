@@ -7,7 +7,7 @@ from ultralytics import YOLO
 import os
 
 WEBCAM_INDEX = 0
-MODEL_PATH = "YOLO-Drowsiness-Detection/runs/train/exp/weights/best.pt"
+MODEL_PATH = "runs/detect/train-4/weights/best.pt"
 PERCLOS_WINDOW = 60
 ALERT_WEIGHTS = {"yolo": 0.50, "perclos": 0.35, "head": 0.15}
 
@@ -151,17 +151,28 @@ class VisionPipeline:
                 self.latest = data
 
             frame = self._draw_hud(frame, data)
-            cv2.imshow("Fatigue Detection", frame)
+            try:
+                cv2.imshow("Fatigue Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except Exception:
+                pass
 
             if time.time() - last_print >= 1.0:
                 print(data)
                 last_print = time.time()
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            try:
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except Exception:
+                pass
 
         cap.release()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
 
     def start(self):
         self._running = True
