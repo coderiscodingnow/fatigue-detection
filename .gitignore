@@ -1,0 +1,22 @@
+# Virtual environment
+venv/
+
+# YOLO dataset images and cache
+YOLO-Drowsiness-Detection/data/
+YOLO-Drowsiness-Detection/datasets/
+YOLO-Drowsiness-Detection/*.jpg
+YOLO-Drowsiness-Detection/*.png
+**/__pycache__/
+*.pyc
+
+# Model weights (too large)
+*.pt
+*.onnx
+
+# Secrets
+serviceAccountKey.json
+.env
+
+# OS
+.DS_Store
+Thumbs.db
