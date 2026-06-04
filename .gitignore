@@ -1,24 +1,22 @@
 # Virtual environment
 venv/
 
-# YOLO dataset images and cache
+# Dataset images
+Drowsiness-Detection-1/
 YOLO-Drowsiness-Detection/data/
 YOLO-Drowsiness-Detection/datasets/
-YOLO-Drowsiness-Detection/*.jpg
-YOLO-Drowsiness-Detection/*.png
-**/__pycache__/
-*.pyc
 
-# Model weights (too large)
-*.pt
-*.onnx
-
-Drowsiness-Detection-1/
+# Training runs (keep train-4 results but not images)
 runs/detect/train/
 runs/detect/train-2/
 runs/detect/train-3/
+runs/detect/train-4/train_batch*.jpg
+runs/detect/train-4/val_batch*.jpg
+
+# Keep best.pt but ignore last.pt
 runs/detect/train-4/weights/last.pt
-venv/
+
+# Python
 __pycache__/
 *.pyc
 
