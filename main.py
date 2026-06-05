@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
 import pickle
 import threading
+from fusion.mqtt_subscriber import SensorSubscriber
 from alerts.voice_alert import VoiceAlert
 from vision.yolo_stream import VisionPipeline
 from fusion.feature_builder import build_features, features_to_array
@@ -20,9 +21,11 @@ def run():
     print("Starting fatigue detection system...")
     pipeline = VisionPipeline()
     pipeline.start()
+    sensor_sub = SensorSubscriber()
+    sensor_sub.start()
     time.sleep(2)
 
-    voice = VoiceAlert(threshold=0.65, cooldown=30)  # ← ADDED HERE
+    voice = VoiceAlert(threshold=0.65, cooldown=30)
 
     print(f"Session: {SESSION_ID} | Driver: {DRIVER_ID}")
     print("Press Ctrl+C to stop.\n")
@@ -30,7 +33,7 @@ def run():
     try:
         while True:
             vision = pipeline.latest
-            sensor = MOCK_SENSOR
+            sensor = sensor_sub.get() or MOCK_SENSOR
 
             features = build_features(vision, sensor)
             X = features_to_array(features).reshape(1, -1)
@@ -50,7 +53,7 @@ def run():
                 alert_key = log_alert(DRIVER_ID, SESSION_ID, alert)
                 reward = 1.0 if fusion_score > 0.75 else 0.5
                 update_reward(action, reward, DRIVER_ID)
-                voice.check_and_alert(fusion_score)  # ← ADDED HERE
+                voice.check_and_alert(fusion_score)
                 print(f"ALERT [{action}] score={fusion_score:.2f} key={alert_key}")
             else:
                 print(f"OK    fusion={fusion_score:.2f} perclos={vision['perclos']:.2f} head={vision['head_state']}")
@@ -60,6 +63,7 @@ def run():
     except KeyboardInterrupt:
         print("\nStopping...")
         pipeline.stop()
+        sensor_sub.stop()
 
 if __name__ == "__main__":
     run()

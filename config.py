@@ -1,5 +1,5 @@
 DRIVER_ID             = "driver_001"
-MQTT_BROKER           = "192.168.1.100"
+MQTT_BROKER           = "10.103.43.32"
 MQTT_PORT             = 1883
 MQTT_TOPIC            = f"driver/{DRIVER_ID}/sensors"
 FIREBASE_URL          = "https://fatigue-detection-26427-default-rtdb.asia-southeast1.firebasedatabase.app"          # fill in after Phase 2
