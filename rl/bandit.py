@@ -2,8 +2,52 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import random
 import json
+import time
+import firebase_admin
+from firebase_admin import credentials
 from firebase.db_client import read_rl_state, write_rl_state
 from config import DRIVER_ID
+
+class FirebaseAdapter:
+    def __init__(self, service_account_path, database_url):
+        self.service_account_path = service_account_path
+        self.database_url = database_url
+        if os.path.exists(service_account_path):
+            try:
+                cred = credentials.Certificate(service_account_path)
+                firebase_admin.initialize_app(cred, {"databaseURL": database_url})
+            except ValueError:
+                # Already initialized by firebase.db_client or previous call
+                pass
+        else:
+            print(f"[FirebaseAdapter] Warning: '{service_account_path}' not found. Running in mock firebase mode.")
+
+class AlertEngine:
+    def __init__(self, driver_id, db):
+        self.driver_id = driver_id
+        self.db = db
+        self.session_id = None
+        self.last_action = "voice_alert"
+
+    def start_session(self):
+        self.session_id = f"session_{int(time.time())}"
+        get_state(self.driver_id)
+
+    def evaluate(self, yolo_conf, jerk_rms, posture_dev, hour, weather, session_min):
+        # Alert if yolo confidence is high or posture deviation is high
+        is_fatigued = (yolo_conf > 0.4) or (posture_dev > 6.0)
+        if is_fatigued:
+            self.last_action = choose_action(self.driver_id)
+            return True
+        return False
+
+    def record_feedback(self, feedback):
+        reward = 1.0 if feedback == "ack" else 0.0
+        update_reward(self.last_action, reward, self.driver_id)
+
+    def end_session(self):
+        pass
+
 
 ACTIONS = ["voice_alert", "vibration_alert", "visual_alert"]
 EPSILON = 0.15

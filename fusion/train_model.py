@@ -49,3 +49,11 @@ if __name__ == "__main__":
 
     print("Model trained and saved to fusion/fusion_model.pkl")
     print(f"Training accuracy: {model.score(X, y):.2f}")
+
+def load_model(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+def predict_fatigue(model, features):
+    probs = model.predict_proba(features.reshape(1, -1))
+    return float(probs[0][1])

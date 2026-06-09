@@ -29,3 +29,17 @@ class VoiceAlert:
                 t.start()
                 return True
         return False
+
+def speak_alert(message):
+    def run_speak():
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 150)
+            engine.setProperty('volume', 1.0)
+            engine.say(message)
+            engine.runAndWait()
+        except Exception as e:
+            print(f"[Voice Alert Error]: {e}")
+            
+    t = threading.Thread(target=run_speak, daemon=True)
+    t.start()

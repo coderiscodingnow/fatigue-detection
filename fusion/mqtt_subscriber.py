@@ -4,15 +4,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import threading
 import paho.mqtt.client as mqtt
-from config import MQTT_BROKER, MQTT_PORT
-
-MQTT_TOPIC = "driver/001/sensors"
+from config import MQTT_BROKER, MQTT_PORT, MQTT_TOPIC
 
 class SensorSubscriber:
     def __init__(self):
         self.latest = None
         self._lock  = threading.Lock()
-        self._client = mqtt.Client()
+        self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
