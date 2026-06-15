@@ -27,10 +27,14 @@ def features_to_array(features):
     ]
     return np.array([features[k] for k in keys], dtype=np.float32)
 
-def build_feature_vector(yolo_conf, perclos, head_state, jerk_rms, posture_dev, hour, weather, session_min):
+def build_feature_vector(yolo_conf, perclos, head_state, jerk_rms, posture_dev, hour, weather, session_min, distance_cm):
     # Calculate alert_score
     head_score = {"nodding": 1.0, "tilted": 0.6, "upright": 0.0, "unknown": 0.0}.get(head_state, 0.0)
     alert_score = 0.50 * yolo_conf + 0.35 * perclos + 0.15 * head_score
+    
+    # Increase alert_score when distance_cm is more than 3.5 cm
+    if distance_cm > 3.5:
+        alert_score = min(1.0, alert_score + 0.20)
 
     # Construct vision and sensor dicts to pass to build_features
     vision_data = {
@@ -46,7 +50,7 @@ def build_feature_vector(yolo_conf, perclos, head_state, jerk_rms, posture_dev, 
         "hour": hour,
         "weather": weather,
         "session_min": session_min,
-        "distance_cm": 0.0,  # default since it's not passed explicitly in main.py
+        "distance_cm": distance_cm,
     }
     
     features = build_features(vision_data, sensor_data)

@@ -15,7 +15,7 @@ from fusion.feature_builder import build_feature_vector
 from fusion.train_model     import load_model, predict_fatigue
 from rl.bandit              import AlertEngine, FirebaseAdapter
 from alerts.voice_alert     import speak_alert
-from firebase.db_client     import write_sensor, log_alert
+from firebase.db_client     import write_sensor, log_alert, get_db
 from weather.weather_client import get_weather
 from config import (
     DRIVER_ID,
@@ -44,30 +44,42 @@ last_ts       = None
 # ── Firebase polling thread ───────────────────────────────────
 def poll_firebase():
     global sensor_data, last_ts
-    print(f"[Firebase] Polling {FIREBASE_READ_URL} every {POLL_INTERVAL_SEC}s")
+    print(f"[Firebase] Polling Firebase via Admin SDK every {POLL_INTERVAL_SEC}s")
     while True:
         try:
-            response = requests.get(FIREBASE_READ_URL, timeout=5)
-            if response.status_code == 200:
-                payload = response.json()
-                if payload is None:
-                    print("[Firebase] No data at path yet. Waiting for ESP32...")
-                    time.sleep(POLL_INTERVAL_SEC)
-                    continue
-                current_ts = payload.get("ts")
-                if current_ts != last_ts:
-                    last_ts = current_ts
-                    with sensor_lock:
-                        sensor_data = payload
-                    write_sensor(DRIVER_ID, payload)
-                    print(f"[Firebase] New reading → "
-                          f"jerk={payload.get('jerk_rms')}  "
-                          f"dist={payload.get('distance_cm')}cm  "
-                          f"ts={current_ts}")
+            fb_db = get_db()
+            if fb_db is not None:
+                payload = fb_db.reference("/drowsiness/latest").get()
             else:
-                print(f"[Firebase] HTTP {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"[Firebase] Network error: {e}")
+                response = requests.get(FIREBASE_READ_URL, timeout=5)
+                if response.status_code == 200:
+                    payload = response.json()
+                else:
+                    payload = None
+                    print(f"[Firebase] HTTP {response.status_code}")
+
+            if payload is None:
+                print("[Firebase] No data at path yet. Waiting for ESP32...")
+                time.sleep(POLL_INTERVAL_SEC)
+                continue
+
+            if not isinstance(payload, dict):
+                print(f"[Firebase] Warning: Payload is not a dict: {payload}")
+                time.sleep(POLL_INTERVAL_SEC)
+                continue
+
+            current_ts = payload.get("ts")
+            if current_ts != last_ts:
+                last_ts = current_ts
+                with sensor_lock:
+                    sensor_data = payload
+                write_sensor(DRIVER_ID, payload)
+                print(f"[Firebase] New reading → "
+                      f"jerk={payload.get('jerk_rms')}  "
+                      f"dist={payload.get('distance_cm')}cm  "
+                      f"ts={current_ts}")
+        except Exception as e:
+            print(f"[Firebase] Error in poll thread: {e}")
         time.sleep(POLL_INTERVAL_SEC)
 
 threading.Thread(target=poll_firebase, daemon=True).start()
@@ -125,9 +137,24 @@ def write_live_status(payload: dict):
 
     # Atomic write — prevents dashboard reading a half-written file
     temp_path = f"{STATUS_PATH}.tmp"
-    with open(temp_path, "w") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(temp_path, STATUS_PATH)
+    try:
+        with open(temp_path, "w") as f:
+            json.dump(payload, f, indent=2)
+    except OSError as e:
+        print(f"[Dashboard] Error writing temp status file: {e}")
+        return
+
+    for attempt in range(5):
+        try:
+            os.replace(temp_path, STATUS_PATH)
+            break
+        except PermissionError:
+            time.sleep(0.05)
+        except OSError as e:
+            print(f"[Dashboard] Error replacing status file: {e}")
+            break
+    else:
+        print("[Dashboard] Warning: Could not update live_status.json due to Windows file lock.")
 
 # ── Alert message builder ─────────────────────────────────────
 def build_alert_message(fusion_score, yolo_conf, perclos, weather, hour) -> str:
@@ -192,6 +219,7 @@ try:
             hour        = hour,
             weather     = weather_cache["condition"],
             session_min = session_min,
+            distance_cm = distance_cm,
         )
 
         # 6. LightGBM fusion score
@@ -205,6 +233,7 @@ try:
             hour        = hour,
             weather     = weather_cache["condition"],
             session_min = session_min,
+            distance_cm = distance_cm,
         )
 
         # 8. Print live status

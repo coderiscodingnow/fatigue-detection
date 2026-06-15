@@ -33,9 +33,10 @@ class AlertEngine:
         self.session_id = f"session_{int(time.time())}"
         get_state(self.driver_id)
 
-    def evaluate(self, yolo_conf, jerk_rms, posture_dev, hour, weather, session_min):
-        # Alert if yolo confidence is high or posture deviation is high
-        is_fatigued = (yolo_conf > 0.4) or (posture_dev > 6.0)
+    def evaluate(self, yolo_conf, jerk_rms, posture_dev, hour, weather, session_min, distance_cm=0.0):
+        # Alert if yolo confidence is high, posture deviation is high, or head is far from ultrasonic sensor
+        is_dangerous_distance = distance_cm > 3.5
+        is_fatigued = (yolo_conf > 0.4) or (posture_dev > 6.0) or is_dangerous_distance
         if is_fatigued:
             self.last_action = choose_action(self.driver_id)
             return True

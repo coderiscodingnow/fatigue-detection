@@ -324,7 +324,7 @@ def render_alert_timeline(history):
             sev, cls = "ALERT",    "ok"
 
         jerk = sf(p.get("jerk_rms", 0))
-        post = sf(p.get("posture_dev_cm", 0))
+        dist = sf(p.get("distance_cm", 0))
         yolo = sf(p.get("yolo_confidence", 0))
 
         html_out += f"""
@@ -332,7 +332,7 @@ def render_alert_timeline(history):
           <div class="tl-time">{t}</div>
           <div>
             <div class="tl-score" style="color:{'#E16428' if cls=='crit' else ('#E1A028' if cls=='warn' else '#4CAF82')};">{fs:.3f} <span style="font-size:0.65rem;font-weight:700;letter-spacing:1px;">{sev}</span></div>
-            <div class="tl-msg">YOLO {yolo:.2f} &nbsp;|&nbsp; Jerk {jerk:.2f} &nbsp;|&nbsp; Posture {post:.1f} cm</div>
+            <div class="tl-msg">YOLO {yolo:.2f} &nbsp;|&nbsp; Jerk {jerk:.2f} &nbsp;|&nbsp; Distance {dist:.1f} cm</div>
           </div>
         </div>"""
     html_out += "</div>"
@@ -350,7 +350,7 @@ def make_trend_chart(history, max_pts=90):
             ("YOLO Confidence",  "yolo_confidence"),
             ("PERCLOS",          "perclos"),
             ("Jerk RMS",         "jerk_rms"),
-            ("Posture Dev (cm)", "posture_dev_cm"),
+            ("Distance (cm)",    "distance_cm"),
         ]:
             rows.append({"i": i, "Time": t, "Metric": metric, "Value": sf(p.get(key, 0))})
     df = pd.DataFrame(rows)
@@ -360,7 +360,7 @@ def make_trend_chart(history, max_pts=90):
             y=alt.Y("Value:Q", title=""),
             color=alt.Color("Metric:N",
                 scale=alt.Scale(
-                    domain=["Fusion Score","YOLO Confidence","PERCLOS","Jerk RMS","Posture Dev (cm)"],
+                    domain=["Fusion Score","YOLO Confidence","PERCLOS","Jerk RMS","Distance (cm)"],
                     range=["#E16428","#F6E9E9","rgba(246,233,233,0.45)","rgba(246,233,233,0.65)","rgba(225,100,40,0.5)"],
                 ),
                 legend=alt.Legend(labelColor="#F6E9E9", titleColor="#F6E9E9", orient="top", title=None),
@@ -480,9 +480,9 @@ def display_dashboard():
                 <div class="m-sub">Motion variation</div>
               </div>
               <div class="metric-card lit">
-                <div class="m-label">POSTURE DEV</div>
-                <div class="m-val">{posture:.1f}<span style="font-size:1rem"> cm</span></div>
-                <div class="m-sub">Head deviation</div>
+                <div class="m-label">DISTANCE</div>
+                <div class="m-val">{distance:.1f}<span style="font-size:1rem"> cm</span></div>
+                <div class="m-sub">Head distance</div>
               </div>
               <div class="metric-card">
                 <div class="m-label">WEATHER</div>
@@ -510,7 +510,6 @@ def display_dashboard():
         <div class="sv-grid">
           {render_sv("Distance",      f"{distance:.1f}",  "cm",  lit=True)}
           {render_sv("Jerk RMS",      f"{jerk:.3f}",      "",    lit=True)}
-          {render_sv("Posture Dev",   f"{posture:.1f}",   "cm",  lit=True)}
           {render_sv("Head State",    head,               "",    lit=True)}
         </div>""", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
