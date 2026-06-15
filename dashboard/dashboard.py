@@ -1,700 +1,636 @@
+"""
+Driver Monitoring System Dashboard
+Night mode car dashboard — tabbed layout with live heatmap, sensor values, and alert timeline.
+"""
+
 import json
 import os
 import sys
 import time
+import html
 from datetime import datetime
-from html import escape
-
-import altair as alt
 import pandas as pd
-import requests
+import altair as alt
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import DRIVER_ID, FIREBASE_READ_URL, MOCK_SENSOR, WEATHER_CITY
+from config import DRIVER_ID, WEATHER_CITY
 
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATUS_PATH = os.path.join(BASE_DIR, "dashboard", "live_status.json")
-MOCK_DB_PATH = os.path.join(BASE_DIR, "mock_db.json")
-REFRESH_SECONDS = 2
-MAX_CHART_POINTS = 90
 
 COLORS = {
-    "navy": "#111844",
-    "indigo": "#4B5694",
-    "cream": "#EAE0CF",
-    "steel": "#7288AE",
-    "panel": "#151B3D",
-    "panel_soft": "#202856",
-    "line_a": "#EAE0CF",
-    "line_b": "#7288AE",
-    "line_c": "#B9C5DD",
-    "accent": "#D96F4B",
+    "bg":           "#272121",
+    "panel":        "#363333",
+    "accent":       "#E16428",
+    "text":         "#F6E9E9",
+    "muted":        "rgba(246,233,233,0.6)",
+    "muted_border": "rgba(246,233,233,0.1)",
+    "success":      "#4CAF82",
+    "warning":      "#E1A028",
 }
 
-PRIMARY_METRICS = [
-    ("YOLO Score", "yolo_confidence", "Vision model drowsy confidence", "YS"),
-    ("Time", "time", "Latest main.py reading", "TM"),
-    ("Weather", "weather", "OpenWeather condition", "WX"),
-    ("Timestamp", "timestamp", "Raw live status timestamp", "TS"),
-]
-
-NUMERIC_GRAPH_FIELDS = [
-    ("yolo_confidence", "YOLO Score"),
-    ("perclos", "PERCLOS"),
-    ("fusion_score", "Fusion Score"),
-    ("jerk_rms", "Jerk RMS"),
-    ("posture_dev_cm", "Posture Deviation"),
-]
-
-st.set_page_config(page_title="Fatigue Monitor", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="Driver Monitoring HUD",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
+# ─────────────────────────────────────────────────────────────
+#  CSS
+# ─────────────────────────────────────────────────────────────
 def inject_styles():
-    st.markdown(
-        f"""
-        <style>
-            :root {{
-                --navy: {COLORS["navy"]};
-                --indigo: {COLORS["indigo"]};
-                --cream: {COLORS["cream"]};
-                --steel: {COLORS["steel"]};
-                --panel: {COLORS["panel"]};
-                --panel-soft: {COLORS["panel_soft"]};
-                --accent: {COLORS["accent"]};
-                --muted: rgba(234, 224, 207, 0.68);
-            }}
+    st.markdown(f"""
+    <style>
+        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
-            .stApp {{
-                background: radial-gradient(circle at top left, rgba(75,86,148,0.20), transparent 34%),
-                            linear-gradient(135deg, #070913 0%, #0A0D1B 48%, #111844 100%);
-                color: var(--cream);
-            }}
+        html, body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stApp"] {{
+            background-color: {COLORS["bg"]} !important;
+            color: {COLORS["text"]} !important;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+        header[data-testid="stHeader"] {{ background: transparent !important; }}
+        [data-testid="block-container"] {{
+            max-width: 100% !important;
+            padding: 20px 28px !important;
+            background-color: {COLORS["bg"]};
+        }}
 
-            header[data-testid="stHeader"] {{
-                background: transparent;
-            }}
+        /* ── Tab bar ── */
+        [data-testid="stTabs"] > div:first-child {{
+            border-bottom: 1px solid {COLORS["muted_border"]};
+            gap: 4px;
+            margin-bottom: 20px;
+        }}
+        button[data-baseweb="tab"] {{
+            background: transparent !important;
+            color: {COLORS["muted"]} !important;
+            font-size: 0.78rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 1.2px !important;
+            text-transform: uppercase !important;
+            padding: 10px 20px !important;
+            border: none !important;
+            border-bottom: 2px solid transparent !important;
+            border-radius: 0 !important;
+        }}
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            color: {COLORS["text"]} !important;
+            border-bottom: 2px solid {COLORS["accent"]} !important;
+        }}
+        button[data-baseweb="tab"]:hover {{
+            color: {COLORS["text"]} !important;
+            background: rgba(246,233,233,0.04) !important;
+        }}
+        [data-testid="stTabsContent"] {{ padding-top: 0 !important; }}
 
-            [data-testid="block-container"] {{
-                max-width: 1480px;
-                padding: 1rem 1.25rem 2rem;
-            }}
+        /* ── HUD header ── */
+        .hud-header {{
+            background: {COLORS["panel"]};
+            border: 1px solid {COLORS["muted_border"]};
+            border-radius: 8px;
+            padding: 14px 22px;
+            margin-bottom: 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .hud-title  {{ font-size:1.35rem; font-weight:800; letter-spacing:2px; text-transform:uppercase; }}
+        .hud-sub    {{ font-size:0.72rem; color:{COLORS["muted"]}; letter-spacing:1px; text-transform:uppercase; margin-top:3px; }}
+        .status-pill {{
+            border: 2px solid {COLORS["muted_border"]};
+            border-radius: 4px;
+            padding: 7px 15px;
+            font-size: 0.8rem;
+            font-weight: 800;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: {COLORS["text"]};
+        }}
+        .status-pill.warn    {{ border-color:{COLORS["warning"]}; color:{COLORS["warning"]}; }}
+        .status-pill.crit    {{ border-color:{COLORS["accent"]};  color:{COLORS["accent"]};  }}
 
-            [data-testid="stSidebar"] {{
-                background: #070913;
-                border-right: 1px solid rgba(234, 224, 207, 0.10);
-            }}
+        /* ── Cards ── */
+        .card {{
+            background: {COLORS["panel"]};
+            border: 1px solid {COLORS["muted_border"]};
+            border-radius: 8px;
+            padding: 18px 20px;
+            margin-bottom: 18px;
+        }}
+        .card-title {{
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            color: {COLORS["muted"]};
+            text-transform: uppercase;
+            margin-bottom: 14px;
+        }}
 
-            [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {{
-                color: var(--cream);
-            }}
+        /* ── Metric grid ── */
+        .metric-grid {{
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 14px;
+            margin-bottom: 18px;
+        }}
+        .metric-card {{
+            background: {COLORS["panel"]};
+            border: 1px solid {COLORS["muted_border"]};
+            border-radius: 8px;
+            padding: 14px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }}
+        .metric-card::before {{
+            content:''; position:absolute; top:0; left:0;
+            width:4px; height:100%;
+            background: rgba(246,233,233,0.15);
+        }}
+        .metric-card.lit::before {{ background:{COLORS["accent"]}; }}
+        .m-label {{ font-size:0.66rem; font-weight:700; letter-spacing:1px; color:{COLORS["muted"]}; text-transform:uppercase; }}
+        .m-val   {{ font-size:1.6rem; font-weight:800; color:{COLORS["text"]}; margin:7px 0; font-variant-numeric:tabular-nums; }}
+        .m-sub   {{ font-size:0.62rem; color:{COLORS["muted"]}; }}
 
-            .account-card {{
-                align-items: center;
-                border-bottom: 1px solid rgba(234, 224, 207, 0.12);
-                display: flex;
-                gap: 0.75rem;
-                padding: 0.55rem 0 1.05rem;
-            }}
+        /* ── Sensor value grid ── */
+        .sv-grid {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }}
+        .sv-card {{
+            border: 1px solid {COLORS["muted_border"]};
+            border-radius: 8px;
+            padding: 13px 15px;
+            background: rgba(39,33,33,0.4);
+        }}
+        .sv-card.lit {{ border-color:rgba(225,100,40,0.55); box-shadow:inset 3px 0 0 {COLORS["accent"]}; }}
+        .sv-label  {{ font-size:0.63rem; font-weight:700; letter-spacing:1px; color:{COLORS["muted"]}; text-transform:uppercase; white-space:nowrap; }}
+        .sv-val    {{ margin-top:7px; font-size:1.1rem; font-weight:800; color:{COLORS["text"]}; font-variant-numeric:tabular-nums; }}
+        .sv-unit   {{ color:{COLORS["muted"]}; font-size:0.68rem; margin-left:3px; }}
 
-            .account-avatar {{
-                align-items: center;
-                background: var(--accent);
-                border: 1px solid rgba(234, 224, 207, 0.42);
-                border-radius: 8px;
-                color: white;
-                display: flex;
-                font-size: 1.15rem;
-                font-weight: 850;
-                height: 48px;
-                justify-content: center;
-                width: 48px;
-            }}
+        /* ── Gauge ── */
+        .gauge-wrap {{ display:flex; justify-content:center; padding:8px 0 4px; }}
+        .gauge-inner {{ position:relative; width:160px; height:160px; display:flex; align-items:center; justify-content:center; }}
+        .gauge-svg  {{ transform:rotate(-90deg); }}
+        .gauge-bg   {{ fill:none; stroke:rgba(246,233,233,0.05); stroke-width:10; }}
+        .gauge-arc  {{ fill:none; stroke-width:10; stroke-linecap:round; transition:stroke-dashoffset .5s ease; }}
+        .gauge-overlay {{ position:absolute; display:flex; flex-direction:column; align-items:center; justify-content:center; }}
+        .gauge-pct  {{ font-size:2rem; font-weight:800; color:{COLORS["text"]}; line-height:1; }}
+        .gauge-lbl  {{ font-size:0.6rem; font-weight:700; letter-spacing:1px; color:{COLORS["muted"]}; margin-top:5px; text-transform:uppercase; }}
 
-            .account-name {{
-                color: var(--cream);
-                font-size: 1.2rem;
-                font-weight: 850;
-                line-height: 1.15;
-            }}
+        /* ── Heatmap ── */
+        .hm-title {{ font-size:0.7rem; font-weight:700; letter-spacing:1.5px; color:{COLORS["muted"]}; text-transform:uppercase; margin-bottom:12px; }}
+        .hm-grid  {{ display:grid; grid-template-columns:repeat(12,1fr); gap:6px; }}
+        .hm-cell  {{
+            aspect-ratio:1; border-radius:4px;
+            border:1px solid rgba(246,233,233,0.05);
+            transition:transform .15s, box-shadow .15s;
+        }}
+        .hm-cell:hover {{ transform:scale(1.2); z-index:10; border-color:{COLORS["accent"]}; }}
 
-            .account-mail, .muted {{
-                color: var(--muted);
-                font-size: 0.78rem;
-            }}
+        /* ── Warning banner ── */
+        .warn-banner {{
+            background: linear-gradient(90deg,rgba(225,100,40,0.14) 0%,rgba(39,33,33,0) 100%);
+            border-left: 4px solid {COLORS["accent"]};
+            padding: 14px 18px;
+            border-radius: 0 8px 8px 0;
+            margin-bottom: 20px;
+        }}
+        .warn-title {{ font-size:0.82rem; font-weight:800; color:{COLORS["accent"]}; letter-spacing:1.5px; text-transform:uppercase; }}
+        .warn-desc  {{ font-size:0.78rem; color:{COLORS["text"]}; margin-top:4px; }}
 
-            .side-label {{
-                color: rgba(234, 224, 207, 0.46);
-                font-size: 0.72rem;
-                font-weight: 760;
-                letter-spacing: 0.08em;
-                margin: 1.25rem 0 0.52rem;
-                text-transform: uppercase;
-            }}
+        /* ── Alert timeline ── */
+        .timeline {{ display:flex; flex-direction:column; gap:10px; }}
+        .tl-row {{
+            display:flex; align-items:flex-start; gap:14px;
+            background:{COLORS["panel"]}; border:1px solid {COLORS["muted_border"]};
+            border-radius:8px; padding:12px 16px;
+        }}
+        .tl-row.crit {{ border-left:3px solid {COLORS["accent"]}; }}
+        .tl-row.warn {{ border-left:3px solid {COLORS["warning"]}; }}
+        .tl-row.ok   {{ border-left:3px solid {COLORS["success"]}; }}
+        .tl-time  {{ font-size:0.72rem; font-weight:700; font-family:monospace; color:{COLORS["muted"]}; white-space:nowrap; margin-top:2px; }}
+        .tl-score {{ font-size:1.1rem; font-weight:800; color:{COLORS["text"]}; min-width:52px; }}
+        .tl-msg   {{ font-size:0.78rem; color:{COLORS["muted"]}; margin-top:3px; line-height:1.45; }}
 
-            .nav-item, .nav-item-active {{
-                border: 1px solid rgba(234, 224, 207, 0.08);
-                border-radius: 8px;
-                color: rgba(234, 224, 207, 0.78);
-                font-size: 0.91rem;
-                font-weight: 720;
-                margin-bottom: 0.48rem;
-                padding: 0.72rem 0.78rem;
-            }}
-
-            .nav-item-active {{
-                background: rgba(75, 86, 148, 0.32);
-                border-color: var(--accent);
-                color: var(--cream);
-                box-shadow: inset 3px 0 0 var(--accent);
-            }}
-
-            .topbar {{
-                align-items: center;
-                display: flex;
-                gap: 1rem;
-                justify-content: space-between;
-                margin-bottom: 1rem;
-            }}
-
-            .page-title {{
-                color: var(--cream);
-                font-size: 1.55rem;
-                font-weight: 850;
-                letter-spacing: 0;
-                margin: 0;
-            }}
-
-            .page-subtitle {{
-                color: var(--muted);
-                font-size: 0.86rem;
-                margin-top: 0.25rem;
-            }}
-
-            .status-chip {{
-                background: rgba(234, 224, 207, 0.08);
-                border: 1px solid rgba(234, 224, 207, 0.13);
-                border-radius: 8px;
-                color: var(--cream);
-                display: inline-block;
-                font-size: 0.78rem;
-                font-weight: 780;
-                margin-left: 0.5rem;
-                padding: 0.62rem 0.78rem;
-                white-space: nowrap;
-            }}
-
-            .metric-card, .panel, .alert-box {{
-                background: linear-gradient(180deg, rgba(21,27,61,0.98), rgba(12,17,38,0.98));
-                border: 1px solid rgba(234, 224, 207, 0.08);
-                border-radius: 8px;
-                box-shadow: 0 20px 42px rgba(0,0,0,0.24);
-            }}
-
-            .metric-card {{
-                min-height: 146px;
-                padding: 1rem;
-            }}
-
-            .metric-head {{
-                align-items: center;
-                display: flex;
-                gap: 0.72rem;
-                margin-bottom: 1rem;
-            }}
-
-            .metric-icon {{
-                align-items: center;
-                background: rgba(217, 111, 75, 0.16);
-                border: 1px solid rgba(217, 111, 75, 0.40);
-                border-radius: 8px;
-                color: var(--cream);
-                display: flex;
-                font-size: 0.8rem;
-                font-weight: 850;
-                height: 38px;
-                justify-content: center;
-                width: 38px;
-            }}
-
-            .metric-label {{
-                color: var(--muted);
-                font-size: 0.76rem;
-                font-weight: 760;
-                letter-spacing: 0.05em;
-                line-height: 1.22;
-                text-transform: uppercase;
-            }}
-
-            .metric-value {{
-                color: var(--cream);
-                font-size: 1.85rem;
-                font-weight: 850;
-                line-height: 1.08;
-                overflow-wrap: anywhere;
-            }}
-
-            .metric-foot {{
-                color: rgba(234, 224, 207, 0.54);
-                font-size: 0.76rem;
-                margin-top: 0.58rem;
-            }}
-
-            .panel {{
-                padding: 1rem;
-            }}
-
-            .panel-title {{
-                color: var(--cream);
-                font-size: 1rem;
-                font-weight: 820;
-                margin-bottom: 0.25rem;
-            }}
-
-            .panel-caption {{
-                color: var(--muted);
-                font-size: 0.8rem;
-                margin-bottom: 0.85rem;
-            }}
-
-            .alert-box {{
-                min-height: 156px;
-                padding: 1rem;
-            }}
-
-            .alert-label {{
-                color: var(--muted);
-                font-size: 0.76rem;
-                font-weight: 780;
-                letter-spacing: 0.07em;
-                text-transform: uppercase;
-            }}
-
-            .alert-value {{
-                color: var(--cream);
-                font-size: 1.1rem;
-                font-weight: 820;
-                line-height: 1.35;
-                margin-top: 0.8rem;
-            }}
-
-            .field-grid {{
-                display: grid;
-                gap: 0.55rem;
-                grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-            }}
-
-            .field-tile {{
-                background: rgba(32, 40, 86, 0.58);
-                border: 1px solid rgba(234, 224, 207, 0.08);
-                border-radius: 8px;
-                min-height: 76px;
-                padding: 0.78rem;
-            }}
-
-            .field-name {{
-                color: rgba(234, 224, 207, 0.54);
-                font-size: 0.7rem;
-                font-weight: 780;
-                letter-spacing: 0.06em;
-                text-transform: uppercase;
-            }}
-
-            .field-value {{
-                color: var(--cream);
-                font-size: 1rem;
-                font-weight: 760;
-                margin-top: 0.38rem;
-                overflow-wrap: anywhere;
-            }}
-
-            .stAltairChart {{
-                background: transparent;
-            }}
-
-            .stTabs [data-baseweb="tab-list"] {{
-                gap: 0.45rem;
-            }}
-
-            .stTabs [data-baseweb="tab"] {{
-                background: rgba(234, 224, 207, 0.07);
-                border: 1px solid rgba(234, 224, 207, 0.10);
-                border-radius: 8px;
-                color: rgba(234, 224, 207, 0.72);
-                font-size: 0.82rem;
-                font-weight: 760;
-                height: 38px;
-                padding: 0 0.8rem;
-            }}
-
-            .stTabs [aria-selected="true"] {{
-                background: rgba(217, 111, 75, 0.18);
-                border-color: rgba(217, 111, 75, 0.55);
-                color: var(--cream);
-            }}
-
-            @media (max-width: 760px) {{
-                [data-testid="block-container"] {{
-                    padding: 0.75rem 0.75rem 1.5rem;
-                }}
-                .topbar {{
-                    align-items: flex-start;
-                    flex-direction: column;
-                }}
-                .status-chip {{
-                    margin: 0 0.35rem 0.35rem 0;
-                }}
-            }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        /* ── Responsive ── */
+        @media (max-width:1100px) {{
+            .metric-grid {{ grid-template-columns:repeat(3,1fr); }}
+            .sv-grid     {{ grid-template-columns:repeat(2,1fr); }}
+        }}
+        @media (max-width:640px) {{
+            .metric-grid, .sv-grid {{ grid-template-columns:1fr; }}
+            [data-testid="block-container"] {{ padding:12px !important; }}
+        }}
+    </style>
+    """, unsafe_allow_html=True)
 
 
-def safe_text(value, fallback="Waiting"):
-    if value is None or value == "":
-        return fallback
-    return escape(str(value))
+# ─────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────
+def sf(v, d=0.0):
+    try:    return float(v)
+    except: return d
 
+def st_(v, d="N/A"):
+    if v is None or v == "": v = d
+    return html.escape(str(v))
 
-def value_text(value, digits=2, suffix=""):
-    if value is None or value == "":
-        return "Waiting"
-    if isinstance(value, float):
-        return f"{value:.{digits}f}{suffix}"
-    if isinstance(value, int):
-        return f"{value}{suffix}"
+def data_age(ts):
+    if not ts: return "N/A"
+    s = max(0.0, time.time() - sf(ts, time.time()))
+    return f"{s:.0f}s" if s < 60 else f"{s/60:.1f}m"
+
+def load_status():
     try:
-        return f"{float(value):.{digits}f}{suffix}"
-    except (TypeError, ValueError):
-        return f"{value}{suffix}"
+        if os.path.exists(STATUS_PATH):
+            with open(STATUS_PATH) as f:
+                return json.load(f)
+    except Exception: pass
+    return None
 
 
-def read_json_file(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r") as file:
-            return json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return {}
+# ─────────────────────────────────────────────────────────────
+#  Component renderers
+# ─────────────────────────────────────────────────────────────
+def render_gauge(alertness):
+    pct = int(alertness * 100)
+    da  = 314.16
+    off = da - da * (pct / 100)
+    lbl = "NORMAL" if pct >= 75 else ("WARNING" if pct >= 55 else "CRITICAL")
+    clr = COLORS["success"] if pct >= 75 else (COLORS["warning"] if pct >= 55 else COLORS["accent"])
+    return f"""
+    <div class="gauge-wrap"><div class="gauge-inner">
+      <svg class="gauge-svg" width="160" height="160" viewBox="0 0 120 120">
+        <circle cx="60" cy="60" r="50" class="gauge-bg"/>
+        <circle cx="60" cy="60" r="50" class="gauge-arc"
+          style="stroke-dasharray:{da};stroke-dashoffset:{off};stroke:{clr};"/>
+      </svg>
+      <div class="gauge-overlay">
+        <div class="gauge-pct" style="color:{clr};">{pct}%</div>
+        <div class="gauge-lbl">{lbl}</div>
+      </div>
+    </div></div>"""
 
 
-def read_live_sensor():
-    try:
-        response = requests.get(FIREBASE_READ_URL, timeout=4)
-        if response.status_code == 200:
-            return response.json() or {}
-    except requests.exceptions.RequestException:
-        return {}
-    return {}
+def render_heatmap(history, n=60):
+    pts = history[-n:]
+    vals = []
+    for p in pts:
+        try:    vals.append(max(0.0, min(1.0, 1.0 - float(p.get("fusion_score") or 0))))
+        except: vals.append(1.0)
+    vals = [1.0] * (n - len(vals)) + vals
+
+    html_out = '<div class="hm-title">ALERTNESS HEATMAP — LAST 60 SECONDS</div><div class="hm-grid">'
+    for a in vals:
+        d = 1.0 - a
+        r = int(54  + d * (225 - 54))
+        g = int(51  + d * (100 - 51))
+        b = int(51  + d * (40  - 51))
+        glow = (f'box-shadow:0 0 6px rgba(225,100,40,{min(0.8,d)});border-color:rgba(225,100,40,0.8);'
+                if d >= 0.45 else "")
+        html_out += f'<div class="hm-cell" style="background:rgb({r},{g},{b});{glow}" title="Alertness:{a*100:.0f}%"></div>'
+    html_out += "</div>"
+    return html_out
 
 
-def read_latest_alert():
-    mock_data = read_json_file(MOCK_DB_PATH)
-    sessions = mock_data.get("drivers", {}).get(DRIVER_ID, {}).get("sessions", {})
-    newest_key = ""
-    newest_alert = {}
-    for session in sessions.values():
-        alerts = session.get("alerts", {}) if isinstance(session, dict) else {}
-        for alert_key, alert in alerts.items():
-            marker = str(alert_key)
-            if marker > newest_key:
-                newest_key = marker
-                newest_alert = alert if isinstance(alert, dict) else {}
-    return newest_alert
+def render_sv(label, val, unit="", lit=False):
+    cls = "sv-card lit" if lit else "sv-card"
+    return f'<div class="{cls}"><div class="sv-label">{st_(label)}</div><div class="sv-val">{st_(val)}<span class="sv-unit">{st_(unit,"")}</span></div></div>'
 
 
-def build_status():
-    status = read_json_file(STATUS_PATH)
-    live_sensor = read_live_sensor()
-    latest_alert = read_latest_alert()
+def render_alert_timeline(history):
+    """Build alert timeline from history — shows every second with a fusion score + severity."""
+    rows = [p for p in history if p.get("fusion_score") is not None][-40:]
+    if not rows:
+        return f'<div style="color:{COLORS["muted"]};text-align:center;padding:40px;">No history yet.</div>'
 
-    if not status:
-        status = {
-            "driver_id": DRIVER_ID,
-            "jerk_rms": live_sensor.get("jerk_rms", MOCK_SENSOR.get("jerk_rms")),
-            "posture_dev_cm": live_sensor.get("posture_dev_cm", MOCK_SENSOR.get("posture_dev_cm")),
-            "distance_cm": live_sensor.get("distance_cm", MOCK_SENSOR.get("distance_cm")),
-            "hour": live_sensor.get("hour", MOCK_SENSOR.get("hour")),
-            "weather": latest_alert.get("weather", MOCK_SENSOR.get("weather")),
-            "weather_city": WEATHER_CITY,
-            "fusion_score": latest_alert.get("fusion_score"),
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "history": [],
-        }
+    html_out = '<div class="timeline">'
+    for p in reversed(rows):
+        fs  = sf(p.get("fusion_score", 0))
+        t   = st_(p.get("time", "–"))
+        if fs >= 0.65:
+            sev, cls = "CRITICAL", "crit"
+        elif fs >= 0.45:
+            sev, cls = "CAUTION",  "warn"
+        else:
+            sev, cls = "ALERT",    "ok"
 
-    for key in ("jerk_rms", "posture_dev_cm", "distance_cm", "hour"):
-        if status.get(key) in (None, "") and live_sensor.get(key) not in (None, ""):
-            status[key] = live_sensor.get(key)
+        jerk = sf(p.get("jerk_rms", 0))
+        post = sf(p.get("posture_dev_cm", 0))
+        yolo = sf(p.get("yolo_confidence", 0))
 
-    status.setdefault("weather_city", WEATHER_CITY)
-    if status.get("weather") in (None, "") and latest_alert.get("weather"):
-        status["weather"] = latest_alert.get("weather")
-    if status.get("fusion_score") in (None, "") and latest_alert.get("fusion_score") is not None:
-        status["fusion_score"] = latest_alert.get("fusion_score")
-
-    status["latest_alert"] = latest_alert.get("message", "No alert recorded")
-    return status
-
-
-def render_sidebar(status):
-    st.sidebar.markdown(
-        f"""
-        <div class="account-card">
-            <div class="account-avatar">D</div>
-            <div>
-                <div class="account-name">EliteDrive</div>
-                <div class="account-mail">{safe_text(status.get("driver_id"), DRIVER_ID)}</div>
-            </div>
-        </div>
-        <div class="side-label">Menu</div>
-        <div class="nav-item-active">Dashboard</div>
-        <div class="nav-item">Live Metrics</div>
-        <div class="nav-item">Weather</div>
-        <div class="nav-item">Alerts</div>
-        <div class="nav-item">Sensor Feed</div>
-        <div class="side-label">Support</div>
-        <div class="nav-item">Settings</div>
-        <div class="nav-item">Support & Ticket</div>
-        """,
-        unsafe_allow_html=True,
-    )
+        html_out += f"""
+        <div class="tl-row {cls}">
+          <div class="tl-time">{t}</div>
+          <div>
+            <div class="tl-score" style="color:{'#E16428' if cls=='crit' else ('#E1A028' if cls=='warn' else '#4CAF82')};">{fs:.3f} <span style="font-size:0.65rem;font-weight:700;letter-spacing:1px;">{sev}</span></div>
+            <div class="tl-msg">YOLO {yolo:.2f} &nbsp;|&nbsp; Jerk {jerk:.2f} &nbsp;|&nbsp; Posture {post:.1f} cm</div>
+          </div>
+        </div>"""
+    html_out += "</div>"
+    return html_out
 
 
-def render_metric(label, value, foot, icon, digits=2, suffix=""):
-    shown = value_text(value, digits=digits, suffix=suffix) if isinstance(value, (int, float)) else safe_text(value)
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-head">
-                <div class="metric-icon">{escape(icon)}</div>
-                <div class="metric-label">{escape(label)}</div>
-            </div>
-            <div class="metric-value">{shown}</div>
-            <div class="metric-foot">{escape(foot)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def status_label(fusion_score):
-    try:
-        score = float(fusion_score)
-    except (TypeError, ValueError):
-        return "Waiting for main.py"
-    if score >= 0.8:
-        return "Critical fatigue risk"
-    if score >= 0.6:
-        return "Fatigue warning"
-    return "Monitoring"
-
-
-def chart_data(history):
+def make_trend_chart(history, max_pts=90):
+    pts = history[-max_pts:]
+    if not pts: return None
     rows = []
-    for index, point in enumerate(history[-MAX_CHART_POINTS:]):
-        label = point.get("time") or str(index + 1)
-        for key, metric in NUMERIC_GRAPH_FIELDS:
-            value = point.get(key)
-            if value is None and key == "yolo_confidence":
-                value = point.get("confidence_score")
-            if value is None and key == "posture_dev_cm":
-                value = point.get("position_value")
-            try:
-                rows.append({"time": label, "metric": metric, "value": float(value)})
-            except (TypeError, ValueError):
-                continue
-    return pd.DataFrame(rows)
-
-
-def render_chart(history):
-    data = chart_data(history)
-    st.markdown(
-        """
-        <div class="panel">
-            <div class="panel-title">Live Value Trends</div>
-            <div class="panel-caption">Line graph of numeric JSON values from main.py. No bar chart is used.</div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if data.empty:
-        st.markdown(
-            '<div class="panel-caption">Run main.py to start collecting graph values.</div></div>',
-            unsafe_allow_html=True,
-        )
-        return
-
-    chart = (
-        alt.Chart(data)
-        .mark_line(point=alt.OverlayMarkDef(size=42), strokeWidth=2.6)
-        .encode(
-            x=alt.X("time:N", title="Time", axis=alt.Axis(labelAngle=-35, labelColor=COLORS["cream"], titleColor=COLORS["cream"])),
-            y=alt.Y("value:Q", title="Value", axis=alt.Axis(labelColor=COLORS["cream"], titleColor=COLORS["cream"])),
-            color=alt.Color(
-                "metric:N",
-                scale=alt.Scale(range=[COLORS["accent"], COLORS["cream"], COLORS["steel"], COLORS["line_c"], COLORS["indigo"]]),
-                legend=alt.Legend(labelColor=COLORS["cream"], titleColor=COLORS["cream"], orient="top"),
+    for i, p in enumerate(pts):
+        t = p.get("time", str(i))
+        for metric, key in [
+            ("Fusion Score",     "fusion_score"),
+            ("YOLO Confidence",  "yolo_confidence"),
+            ("PERCLOS",          "perclos"),
+            ("Jerk RMS",         "jerk_rms"),
+            ("Posture Dev (cm)", "posture_dev_cm"),
+        ]:
+            rows.append({"i": i, "Time": t, "Metric": metric, "Value": sf(p.get(key, 0))})
+    df = pd.DataFrame(rows)
+    return (
+        alt.Chart(df).mark_line(strokeWidth=2).encode(
+            x=alt.X("i:Q", title="Time →", axis=alt.Axis(labels=False, grid=False)),
+            y=alt.Y("Value:Q", title=""),
+            color=alt.Color("Metric:N",
+                scale=alt.Scale(
+                    domain=["Fusion Score","YOLO Confidence","PERCLOS","Jerk RMS","Posture Dev (cm)"],
+                    range=["#E16428","#F6E9E9","rgba(246,233,233,0.45)","rgba(246,233,233,0.65)","rgba(225,100,40,0.5)"],
+                ),
+                legend=alt.Legend(labelColor="#F6E9E9", titleColor="#F6E9E9", orient="top", title=None),
             ),
-            tooltip=["time:N", "metric:N", alt.Tooltip("value:Q", format=".3f")],
+            tooltip=["Time:N","Metric:N", alt.Tooltip("Value:Q", format=".3f")],
         )
-        .properties(height=405)
+        .properties(height=260)
         .configure_view(strokeOpacity=0)
-        .configure_axis(gridColor="rgba(234,224,207,0.08)", domainColor="rgba(234,224,207,0.18)")
-        .configure(background="#0F142D")
-    )
-    st.altair_chart(chart, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_weather_panel(status):
-    condition = status.get("weather") or "Waiting"
-    score = status.get("weather_score")
-    city = status.get("weather_city") or WEATHER_CITY
-    st.markdown(
-        f"""
-        <div class="panel">
-            <div class="panel-title">Weather API</div>
-            <div class="panel-caption">Live OpenWeather data used by the fatigue model.</div>
-            <div class="field-grid">
-                <div class="field-tile">
-                    <div class="field-name">City</div>
-                    <div class="field-value">{safe_text(city)}</div>
-                </div>
-                <div class="field-tile">
-                    <div class="field-name">Condition</div>
-                    <div class="field-value">{safe_text(condition)}</div>
-                </div>
-                <div class="field-tile">
-                    <div class="field-name">Severity</div>
-                    <div class="field-value">{value_text(score, digits=2)}</div>
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        .configure_axis(gridColor="rgba(246,233,233,0.05)", domainColor="rgba(246,233,233,0.1)",
+                        labelColor="#F6E9E9", titleColor="#F6E9E9")
+        .configure(background="#363333")
     )
 
 
-def render_live_tile(label, value, icon, suffix="", digits=2):
-    shown = value_text(value, digits=digits, suffix=suffix) if isinstance(value, (int, float)) else safe_text(value)
-    st.markdown(
-        f"""
-        <div class="field-tile">
-            <div class="field-name">{escape(icon)} | {escape(label)}</div>
-            <div class="field-value">{shown}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# ─────────────────────────────────────────────────────────────
+#  Main dashboard
+# ─────────────────────────────────────────────────────────────
+def display_dashboard():
+    inject_styles()
+    status = load_status()
+
+    if status is None:
+        st.markdown(f"""
+        <div style="text-align:center;padding:120px 20px;">
+          <div style="color:{COLORS['accent']};font-size:1.3rem;font-weight:800;letter-spacing:2px;">
+            INITIALIZING COCKPIT HUD...
+          </div>
+          <div style="color:{COLORS['text']};opacity:.55;margin-top:10px;font-size:.85rem;letter-spacing:1px;">
+            Waiting for main.py to write live_status.json…
+          </div>
+        </div>""", unsafe_allow_html=True)
+        time.sleep(1); st.rerun(); return
+
+    # ── Extract values ───────────────────────────────────────
+    history     = status.get("history", [])
+    fusion      = sf(status.get("fusion_score", 0))
+    alertness   = max(0.0, min(1.0, 1.0 - fusion))
+    yolo        = sf(status.get("yolo_confidence", 0))
+    perclos     = sf(status.get("perclos", 0))
+    jerk        = sf(status.get("jerk_rms", 0))
+    posture     = sf(status.get("posture_dev_cm", 0))
+    distance    = sf(status.get("distance_cm", 0))
+    w_score     = sf(status.get("weather_score", 0))
+    sess_min    = sf(status.get("session_min", 0))
+    hour        = int(sf(status.get("hour", datetime.now().hour)))
+    w_cond      = st_(status.get("weather", "N/A"))
+    w_city      = st_(status.get("weather_city", WEATHER_CITY))
+    head        = st_(status.get("head_state", "unknown")).upper()
+    age         = data_age(status.get("timestamp"))
+    t_str       = st_(status.get("time", datetime.now().strftime("%H:%M:%S")))
+    latest_alert= st_(status.get("latest_alert", ""))
+
+    sev_label = "NOMINAL"
+    sev_class = ""
+    if fusion >= 0.65:   sev_label, sev_class = "CRITICAL", "crit"
+    elif fusion >= 0.45: sev_label, sev_class = "CAUTION",  "warn"
+
+    # ── HUD header (always visible) ──────────────────────────
+    st.markdown(f"""
+    <div class="hud-header">
+      <div>
+        <div class="hud-title">DRIVER COCKPIT HUD</div>
+        <div class="hud-sub">VEHICLE: {st_(DRIVER_ID)} &nbsp;|&nbsp; TELEMETRY ACTIVE &nbsp;|&nbsp; DATA AGE: {age}</div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;">
+        <div style="font-family:monospace;font-size:1.2rem;font-weight:700;letter-spacing:1px;">{t_str}</div>
+        <div class="status-pill {sev_class}">{sev_label}</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Warning banner
+    if fusion >= 0.45 and latest_alert and latest_alert not in ("No alert recorded", "N/A"):
+        st.markdown(f"""
+        <div class="warn-banner">
+          <div class="warn-title">DRIVER ALERT</div>
+          <div class="warn-desc">{latest_alert}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ── TABS ─────────────────────────────────────────────────
+    tab_overview, tab_sensors, tab_heatmap, tab_timeline, tab_trends = st.tabs([
+        "OVERVIEW", "SENSOR VALUES", "ALERTNESS HEATMAP", "ALERT TIMELINE", "TRENDS"
+    ])
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 1 — OVERVIEW
+    # ══════════════════════════════════════════════════════════
+    with tab_overview:
+        left, right = st.columns([1, 2.2])
+
+        with left:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown('<div class="card-title">ALERTNESS GAUGE</div>', unsafe_allow_html=True)
+            st.markdown(render_gauge(alertness), unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(render_heatmap(history), unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with right:
+            st.markdown(f"""
+            <div class="card-title">LIVE TELEMETRY</div>
+            <div class="metric-grid">
+              <div class="metric-card lit">
+                <div class="m-label">YOLO CONFIDENCE</div>
+                <div class="m-val">{yolo:.3f}</div>
+                <div class="m-sub">Vision model</div>
+              </div>
+              <div class="metric-card lit">
+                <div class="m-label">PERCLOS</div>
+                <div class="m-val">{perclos*100:.1f}%</div>
+                <div class="m-sub">Eye closure</div>
+              </div>
+              <div class="metric-card lit">
+                <div class="m-label">JERK RMS</div>
+                <div class="m-val">{jerk:.2f}</div>
+                <div class="m-sub">Motion variation</div>
+              </div>
+              <div class="metric-card lit">
+                <div class="m-label">POSTURE DEV</div>
+                <div class="m-val">{posture:.1f}<span style="font-size:1rem"> cm</span></div>
+                <div class="m-sub">Head deviation</div>
+              </div>
+              <div class="metric-card">
+                <div class="m-label">WEATHER</div>
+                <div class="m-val" style="font-size:1.05rem;margin:10px 0 14px;">{w_cond}</div>
+                <div class="m-sub">{w_city}</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown('<div class="card-title">TELEMETRY TRENDS</div>', unsafe_allow_html=True)
+            chart = make_trend_chart(history)
+            if chart:
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.markdown(f'<div style="color:{COLORS["muted"]};text-align:center;padding:50px;">Awaiting data…</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 2 — SENSOR VALUES
+    # ══════════════════════════════════════════════════════════
+    with tab_sensors:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">ESP32 SENSOR READINGS</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="sv-grid">
+          {render_sv("Distance",      f"{distance:.1f}",  "cm",  lit=True)}
+          {render_sv("Jerk RMS",      f"{jerk:.3f}",      "",    lit=True)}
+          {render_sv("Posture Dev",   f"{posture:.1f}",   "cm",  lit=True)}
+          {render_sv("Head State",    head,               "",    lit=True)}
+        </div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">VISION + FUSION</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="sv-grid">
+          {render_sv("YOLO Confidence", f"{yolo:.4f}",      "",    lit=True)}
+          {render_sv("PERCLOS",         f"{perclos*100:.1f}","%" , lit=True)}
+          {render_sv("Fusion Score",    f"{fusion:.4f}",    "",    lit=fusion>=0.45)}
+          {render_sv("Alertness",       f"{alertness*100:.1f}", "%", lit=False)}
+        </div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">CONTEXT</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="sv-grid">
+          {render_sv("Weather",       w_cond,                 "",     lit=w_score>=0.5)}
+          {render_sv("Weather Score", f"{w_score:.2f}",       "",     lit=w_score>=0.5)}
+          {render_sv("Session",       f"{sess_min:.1f}",      "min")}
+          {render_sv("Hour",          f"{hour:02d}:00",       "")}
+          {render_sv("Data Age",      age,                    "")}
+          {render_sv("History Pts",   str(len(history)),      "")}
+        </div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 3 — ALERTNESS HEATMAP
+    # ══════════════════════════════════════════════════════════
+    with tab_heatmap:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">ALERTNESS STATE GAUGE</div>', unsafe_allow_html=True)
+        st.markdown(render_gauge(alertness), unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(render_heatmap(history, n=60), unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="display:flex;gap:20px;margin-top:14px;align-items:center;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:14px;height:14px;border-radius:3px;background:#363333;border:1px solid rgba(246,233,233,.2);"></div>
+            <span style="font-size:0.7rem;color:{COLORS['muted']};">ALERT</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:14px;height:14px;border-radius:3px;background:rgb(139,75,45);"></div>
+            <span style="font-size:0.7rem;color:{COLORS['muted']};">CAUTION</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:14px;height:14px;border-radius:3px;background:#E16428;"></div>
+            <span style="font-size:0.7rem;color:{COLORS['muted']};">DROWSY</span>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Full heatmap of all history
+        if len(history) > 60:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(render_heatmap(history, n=len(history)), unsafe_allow_html=True)
+            st.markdown('<div class="hm-title" style="margin-top:10px;">FULL SESSION HISTORY</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 4 — ALERT TIMELINE
+    # ══════════════════════════════════════════════════════════
+    with tab_timeline:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">ALERT TIMELINE — LATEST FIRST</div>', unsafe_allow_html=True)
+        st.markdown(render_alert_timeline(history), unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════
+    #  TAB 5 — TRENDS
+    # ══════════════════════════════════════════════════════════
+    with tab_trends:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">ALL METRICS — LIVE TREND</div>', unsafe_allow_html=True)
+        chart = make_trend_chart(history, max_pts=90)
+        if chart:
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.markdown(f'<div style="color:{COLORS["muted"]};text-align:center;padding:50px;">Awaiting data…</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Fusion score only chart
+        pts = history[-90:]
+        if pts:
+            df_f = pd.DataFrame([
+                {"i": i, "Time": p.get("time",""), "Fusion Score": sf(p.get("fusion_score",0))}
+                for i, p in enumerate(pts)
+            ])
+            fusion_chart = (
+                alt.Chart(df_f).mark_area(
+                    line={"color": "#E16428", "strokeWidth": 2},
+                    color=alt.Gradient(
+                        gradient="linear", stops=[
+                            alt.GradientStop(color="rgba(225,100,40,0.35)", offset=0),
+                            alt.GradientStop(color="rgba(225,100,40,0)",    offset=1),
+                        ],
+                        x1=1, x2=1, y1=1, y2=0,
+                    )
+                ).encode(
+                    x=alt.X("i:Q", title="Time →", axis=alt.Axis(labels=False, grid=False)),
+                    y=alt.Y("Fusion Score:Q", scale=alt.Scale(domain=[0,1])),
+                    tooltip=["Time:N", alt.Tooltip("Fusion Score:Q", format=".3f")],
+                )
+                .properties(height=180, title=alt.TitleParams("FUSION SCORE OVER TIME", color="#F6E9E9", fontSize=11))
+                .configure_view(strokeOpacity=0)
+                .configure_axis(gridColor="rgba(246,233,233,0.05)", domainColor="rgba(246,233,233,0.1)",
+                                labelColor="#F6E9E9", titleColor="#F6E9E9")
+                .configure(background="#363333")
+            )
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.altair_chart(fusion_chart, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    time.sleep(1)
+    st.rerun()
 
 
-def render_live_data_tabs(status):
-    st.markdown(
-        f"""
-        <div class="panel">
-            <div class="panel-title">Live Data</div>
-            <div class="panel-caption">Tabbed values update every {REFRESH_SECONDS} seconds from main.py.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    vision_tab, motion_tab, weather_tab = st.tabs(["Vision", "Motion", "Weather"])
-
-    with vision_tab:
-        col1, col2 = st.columns(2)
-        with col1:
-            render_live_tile("YOLO Score", status.get("yolo_confidence"), "YS")
-        with col2:
-            render_live_tile("PERCLOS", status.get("perclos"), "PC")
-
-    with motion_tab:
-        col1, col2 = st.columns(2)
-        with col1:
-            render_live_tile("Posture Dev CM", status.get("posture_dev_cm"), "PV", suffix=" cm")
-        with col2:
-            render_live_tile("Jerk RMS", status.get("jerk_rms"), "JR")
-
-    with weather_tab:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            render_live_tile("Weather", status.get("weather"), "WX")
-        with col2:
-            render_live_tile("City", status.get("weather_city") or WEATHER_CITY, "CT")
-        with col3:
-            render_live_tile("Weather Severity", status.get("weather_score"), "WS")
-
-
-def render_right_tabs(status):
-    alert_tab, driver_tab, weather_tab = st.tabs(["Alert", "Driver", "Weather"])
-
-    with alert_tab:
-        st.markdown(
-            f"""
-            <div class="alert-box">
-                <div class="alert-label">Latest Alert</div>
-                <div class="alert-value">{safe_text(status.get("latest_alert"), "No alert recorded")}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.write("")
-        render_metric("Fusion Score", status.get("fusion_score"), "Current fatigue prediction", "FS")
-
-    with driver_tab:
-        render_metric("Head State", status.get("head_state"), "Vision pipeline state", "HS")
-        render_metric("PERCLOS", status.get("perclos"), "Eye closure ratio", "PC")
-        render_metric("Jerk RMS", status.get("jerk_rms"), "Movement variation", "JR")
-
-    with weather_tab:
-        render_weather_panel(status)
-
-
-def render_dashboard():
-    status = build_status()
-    render_sidebar(status)
-
-    fusion = status.get("fusion_score")
-    now = datetime.now().strftime("%H:%M:%S")
-    source_time = status.get("time") or now
-
-    st.markdown(
-        f"""
-        <div class="topbar">
-            <div>
-                <h1 class="page-title">Fatigue Detection Dashboard</h1>
-                <div class="page-subtitle">Driver {safe_text(status.get("driver_id"), DRIVER_ID)} | Live refresh every {REFRESH_SECONDS}s</div>
-            </div>
-            <div>
-                <span class="status-chip">{escape(status_label(fusion))}</span>
-                <span class="status-chip">JSON {safe_text(source_time)}</span>
-                <span class="status-chip">UI {now}</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    metric_cols = st.columns(4)
-    for column, (label, key, foot, icon) in zip(metric_cols, PRIMARY_METRICS):
-        with column:
-            render_metric(label, status.get(key), foot, icon)
-
-    left, right = st.columns([2.15, 1])
-    with left:
-        render_chart(status.get("history", []))
-
-    with right:
-        render_right_tabs(status)
-
-    st.write("")
-    render_live_data_tabs(status)
-
-
-inject_styles()
-render_dashboard()
-time.sleep(REFRESH_SECONDS)
-st.rerun()
+if __name__ == "__main__":
+    display_dashboard()

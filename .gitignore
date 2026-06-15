@@ -27,3 +27,9 @@ serviceAccountKey.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary runtime files
+*.tmp
+mock_db.json
+dashboard/live_status.json
+dashboard/live_status.json.tmp
