@@ -1,6 +1,6 @@
 """
 main.py — Full fatigue detection pipeline
-ESP32 sensors (via Firebase) + YOLO webcam + Weather + LightGBM + RL bandit + Voice alert
+ESP32 sensors (via Firebase) + YOLO webcam + DHT22 cabin sensor + LightGBM + RL bandit + Voice alert
 """
 
 import time
@@ -16,14 +16,12 @@ from fusion.train_model     import load_model, predict_fatigue
 from rl.bandit              import AlertEngine, FirebaseAdapter
 from alerts.voice_alert     import speak_alert
 from firebase.db_client     import write_sensor, log_alert, get_db
-from weather.weather_client import get_weather
 from config import (
     DRIVER_ID,
     FIREBASE_READ_URL,
     FIREBASE_URL,
     FIREBASE_SECRET,
     POLL_INTERVAL_SEC,
-    WEATHER_CITY,
     MODEL_PATH,
 )
 
@@ -99,14 +97,30 @@ engine = AlertEngine(driver_id=DRIVER_ID, db=db)
 engine.start_session()
 print(f"[RL] Session started for {DRIVER_ID}")
 
-# ── Weather ───────────────────────────────────────────────────
-weather_cache      = get_weather()
-last_weather_fetch = time.time()
+# NOTE: weather API removed — cabin_temp/humidity now come from the DHT22
+# on the ESP32, already included in every /drowsiness/latest payload, so
+# they're pulled out of `sensors` each loop iteration below (no separate
+# polling thread or refresh timer needed).
 
 # ── Alert cooldown ────────────────────────────────────────────
 last_alert_time = 0
 ALERT_COOLDOWN  = 30
 latest_alert_msg = "No alert recorded"
+
+# ── ESP32 alert-case config ────────────────────────────────────
+FB_ALERT_PATH = "/alerts/current_case"
+BUZZER_WAIT_SECONDS = 2.0  # must match the ESP32's BUZZER_MS exactly
+
+# Tune these against your sensor logs / model behavior
+POSTURE_DEV_THRESHOLD_CM     = 12.0
+JERK_RMS_THRESHOLD           = 2.5
+FUSION_SCORE_ALERT_THRESHOLD = 0.4
+
+ALERT_VOICE_MESSAGES = {
+    1: "Your posture is incorrect.",
+    2: "Wake up! Drowsiness detected.",
+    3: "Drive smoothly.",
+}
 
 print("\n=== System running. Press Ctrl+C to stop. ===\n")
 
@@ -127,8 +141,8 @@ def write_live_status(payload: dict):
     # Build history point — only numeric values
     history_point = {"time": payload["time"]}
     for key, value in payload.items():
-        if key in ("driver_id", "time", "weather", "head_state",
-                   "history", "latest_alert", "weather_city"):
+        if key in ("driver_id", "time", "head_state",
+                   "history", "latest_alert", "cabin_condition"):
             continue
         if isinstance(value, (int, float)):
             history_point[key] = value
@@ -156,44 +170,82 @@ def write_live_status(payload: dict):
     else:
         print("[Dashboard] Warning: Could not update live_status.json due to Windows file lock.")
 
-# ── Alert message builder ─────────────────────────────────────
-def build_alert_message(fusion_score, yolo_conf, perclos, weather, hour) -> str:
-    if fusion_score > 0.80:
-        severity = "You are severely drowsy"
-    elif fusion_score > 0.60:
-        severity = "You are showing signs of fatigue"
-    else:
-        severity = "Please stay alert"
+# ── Cabin condition helpers (DHT22, replaces old weather API) ─
+def classify_cabin_condition(cabin_temp: float, humidity: float) -> str:
+    """
+    Simple heuristic label from the in-cabin DHT22 reading.
+    A hot/humid cabin is a real drowsiness contributor, so this
+    plugs into build_feature_vector/engine.evaluate the same way
+    the old outdoor weather string used to.
+    Tune the thresholds to your climate if these don't feel right.
+    """
+    if cabin_temp < 0 or humidity < 0:
+        return "unknown"
+    if cabin_temp >= 32:
+        return "hot"
+    if humidity >= 70:
+        return "humid"
+    return "normal"
 
-    time_msg    = ""
-    weather_msg = ""
+def cabin_risk_score(cabin_temp: float, humidity: float) -> float:
+    """0-1 heuristic score for the dashboard, replacing weather_cache['score']."""
+    if cabin_temp < 0 or humidity < 0:
+        return 0.0
+    score = 0.0
+    score += 0.5 if cabin_temp >= 32 else 0.25 if cabin_temp >= 28 else 0.0
+    score += 0.5 if humidity >= 70 else 0.25 if humidity >= 55 else 0.0
+    return min(score, 1.0)
 
-    if 0 <= hour <= 5:
-        time_msg = "It is very late at night"
-    elif 13 <= hour <= 15:
-        time_msg = "Post-lunch drowsiness is common at this hour"
 
-    if any(w in weather for w in ["rain", "fog", "mist"]):
-        weather_msg = f"Visibility is reduced due to {weather}"
+# ── ESP32 alert-case logic ──────────────────────────────────────
+def determine_alert_case(fusion_score, jerk_rms, posture_dev):
+    """
+    Maps the current readings onto one of the three ESP32 alert cases.
+    Priority: drowsiness > sudden jerk > bad posture, since fatigue is the
+    most safety-critical signal. Reorder if your project treats them
+    differently. Returns (case, voice_message) or (None, None).
+    """
+    if fusion_score < FUSION_SCORE_ALERT_THRESHOLD:
+        return 2, ALERT_VOICE_MESSAGES[2]
+    if jerk_rms > JERK_RMS_THRESHOLD:
+        return 3, ALERT_VOICE_MESSAGES[3]
+    if posture_dev > POSTURE_DEV_THRESHOLD_CM:
+        return 1, ALERT_VOICE_MESSAGES[1]
+    return None, None
 
-    parts = [severity]
-    if time_msg:    parts.append(time_msg)
-    if weather_msg: parts.append(weather_msg)
-    parts.append("Please pull over and take a rest")
-    return ". ".join(parts) + "."
+def write_alert_case_to_firebase(case: int):
+    """Writes the alert case + a fresh alert_id to /alerts/current_case.
+    The ESP32 dedups on alert_id (not case), so the same case can fire
+    twice in a row and still be picked up as a new event."""
+    payload = {"case": case, "alert_id": int(time.time() * 1000)}
+    try:
+        fb_db = get_db()
+        if fb_db is not None:
+            fb_db.reference(FB_ALERT_PATH).set(payload)
+        else:
+            requests.put(f"{FIREBASE_URL.rstrip('/')}{FB_ALERT_PATH}.json",
+                         json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Firebase] alert_case write failed: {e}")
 
-# ── Main loop ─────────────────────────────────────────────────
+def handle_alert(case: int, voice_message: str):
+    """Fire-and-forget: writes the case to Firebase immediately, then waits
+    BUZZER_WAIT_SECONDS (so the ESP32 buzzer finishes first) before playing
+    the local voice alert. Runs on a daemon thread so this never blocks
+    the vision loop."""
+    def _worker():
+        write_alert_case_to_firebase(case)
+        time.sleep(BUZZER_WAIT_SECONDS)
+        speak_alert(voice_message)
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 try:
     while True:
-        # 1. Refresh weather every 10 minutes
-        if time.time() - last_weather_fetch > 600:
-            weather_cache      = get_weather()
-            last_weather_fetch = time.time()
-
-        # 2. Get latest vision data
+        # 1. Get latest vision data
         vision = pipeline.latest
 
-        # 3. Get latest sensor data from Firebase polling thread
+        # 2. Get latest sensor data from Firebase polling thread
         with sensor_lock:
             sensors = dict(sensor_data)
 
@@ -202,14 +254,18 @@ try:
             time.sleep(1)
             continue
 
-        # 4. Extract sensor values
+        # 3. Extract sensor values
         jerk_rms    = float(sensors.get("jerk_rms",      0.0) or 0.0)
         posture_dev = float(sensors.get("posture_dev_cm", 0.0) or 0.0)
         distance_cm = float(sensors.get("distance_cm",    0.0) or 0.0)
+        cabin_temp  = float(sensors.get("cabin_temp",    -1.0) or -1.0)
+        humidity    = float(sensors.get("humidity",      -1.0) or -1.0)
         hour        = int(sensors.get("hour", datetime.datetime.now().hour))
         session_min = (time.time() - session_start) / 60
 
-        # 5. Build feature vector
+        cabin_condition = classify_cabin_condition(cabin_temp, humidity)
+
+        # 4. Build feature vector
         features = build_feature_vector(
             yolo_conf   = vision["drowsy_confidence"],
             perclos     = vision["perclos"],
@@ -217,26 +273,26 @@ try:
             jerk_rms    = jerk_rms,
             posture_dev = posture_dev,
             hour        = hour,
-            weather     = weather_cache["condition"],
+            weather     = cabin_condition,
             session_min = session_min,
             distance_cm = distance_cm,
         )
 
-        # 6. LightGBM fusion score
+        # 5. LightGBM fusion score
         fusion_score = predict_fatigue(model, features)
 
-        # 7. RL bandit
+        # 6. RL bandit
         should_alert = engine.evaluate(
             yolo_conf   = vision["drowsy_confidence"],
             jerk_rms    = jerk_rms,
             posture_dev = posture_dev,
             hour        = hour,
-            weather     = weather_cache["condition"],
+            weather     = cabin_condition,
             session_min = session_min,
             distance_cm = distance_cm,
         )
 
-        # 8. Print live status
+        # 7. Print live status
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"[{now_str}] "
               f"YOLO={vision['drowsy_confidence']:.2f}  "
@@ -245,9 +301,9 @@ try:
               f"Posture={posture_dev:.1f}cm  "
               f"Dist={distance_cm:.1f}cm  "
               f"Fusion={fusion_score:.2f}  "
-              f"Weather={weather_cache['condition']}")
+              f"Cabin={cabin_temp:.1f}C/{humidity:.0f}%")
 
-        # 9. Write live_status.json — dashboard reads this
+        # 8. Write live_status.json — dashboard reads this
         write_live_status({
             "driver_id":       DRIVER_ID,
             "time":            now_str,
@@ -259,35 +315,43 @@ try:
             "posture_dev_cm":  posture_dev,         # from Firebase/ESP32
             "distance_cm":     distance_cm,         # from Firebase/ESP32
             "fusion_score":    fusion_score,
-            "weather":         weather_cache["condition"],
-            "weather_score":   weather_cache.get("score"),
-            "weather_city":    WEATHER_CITY,
+            "cabin_temp":      cabin_temp,          # from Firebase/ESP32 (DHT22)
+            "humidity":        humidity,            # from Firebase/ESP32 (DHT22)
+            "cabin_condition": cabin_condition,
+            "cabin_risk_score": cabin_risk_score(cabin_temp, humidity),
             "session_min":     session_min,
             "hour":            hour,
             "latest_alert":    latest_alert_msg,
         })
 
-        # 10. Voice alert with cooldown
+        # 9. Voice alert with cooldown — now routed through ESP32 alert cases
         if should_alert and (time.time() - last_alert_time > ALERT_COOLDOWN):
-            last_alert_time  = time.time()
-            latest_alert_msg = build_alert_message(
-                fusion_score = fusion_score,
-                yolo_conf    = vision["drowsy_confidence"],
-                perclos      = vision["perclos"],
-                weather      = weather_cache["condition"],
-                hour         = hour,
-            )
-            print(f"\n ALERT: {latest_alert_msg}\n")
-            speak_alert(latest_alert_msg)
+            last_alert_time = time.time()
+
+            alert_case, voice_message = determine_alert_case(fusion_score, jerk_rms, posture_dev)
+
+            # If the RL bandit triggered but no specific threshold was crossed, default to Fatigue
+            if alert_case is None:
+                alert_case = 2
+                voice_message = ALERT_VOICE_MESSAGES[2]
+
+            latest_alert_msg = voice_message
+            print(f"\n ALERT (case {alert_case}): {latest_alert_msg}\n")
+
+            # Async: writes /alerts/current_case now, waits 2s for the
+            # ESP32 buzzer to finish, then speaks locally — non-blocking.
+            handle_alert(alert_case, voice_message)
+
             log_alert(DRIVER_ID, engine.session_id, {
-                "fusion_score": fusion_score,
-                "message":      latest_alert_msg,
-                "weather":      weather_cache["condition"],
-                "hour":         hour,
+                "fusion_score":     fusion_score,
+                "alert_case":       alert_case,
+                "message":          latest_alert_msg,
+                "cabin_condition":  cabin_condition,
+                "hour":             hour,
             })
             engine.record_feedback("ack")
 
-        time.sleep(1)
+        time.sleep(0.2)
 
 except KeyboardInterrupt:
     engine.end_session()

@@ -12,7 +12,7 @@ FIREBASE_PATH         = "/drowsiness/latest.json"
 FIREBASE_READ_URL     = f"{FIREBASE_URL}{FIREBASE_PATH}?auth={FIREBASE_SECRET}"
 
 # ── Polling ───────────────────────────────────────────────────
-POLL_INTERVAL_SEC     = 2
+POLL_INTERVAL_SEC     = 0.3
 
 # ── Model paths ───────────────────────────────────────────────
 MODEL_PATH            = "fusion/fusion_model.pkl"
@@ -21,9 +21,6 @@ YOLO_MODEL_PATH       = "runs/detect/train-4/weights/best.pt"
 # ── Thresholds ────────────────────────────────────────────────
 NEUTRAL_DISTANCE_CM   = 28.0
 
-# ── Weather ───────────────────────────────────────────────────
-WEATHER_API_KEY       = "9bedc23df039b6877fdbf241053797eb"
-WEATHER_CITY          = "Bangalore"
 
 # ── Mock sensor fallback (used when ESP32 data is unavailable) ─
 MOCK_SENSOR = {

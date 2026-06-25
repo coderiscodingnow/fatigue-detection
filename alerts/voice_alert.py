@@ -42,4 +42,4 @@ def speak_alert(message):
             print(f"[Voice Alert Error]: {e}")
             
     t = threading.Thread(target=run_speak, daemon=True)
-    t.start()
+    t.start()
